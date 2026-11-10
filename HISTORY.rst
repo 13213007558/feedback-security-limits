@@ -3,6 +3,21 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Bug Fix
+
+  * Memory storage (sync & async): reclaim expired counters, events and
+    idle locks with a bounded, expiry-scheduled cleanup instead of a full
+    scan, so idle memory no longer grows with the number of historical
+    (e.g. one-shot, IP rotating) keys.
+  * Memory storage (sync & async): reference count per key locks so the
+    cleanup never deletes a lock that is held or waited on, keeping
+    increments/decrements atomic when a key is reused right after expiry.
+  * Memory storage (sync & async): add ``close()`` to stop the background
+    cleanup thread/task.
+
 v5.8.0
 ------
 Release Date: 2026-02-04
