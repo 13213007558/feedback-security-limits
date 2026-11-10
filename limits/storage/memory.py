@@ -9,9 +9,12 @@ from math import floor
 import limits.typing
 from limits.storage.base import (
     MovingWindowSupport,
+    MultiLimitEntry,
+    MultiLimitResult,
     SlidingWindowCounterSupport,
     Storage,
     TimestampedSlidingWindow,
+    merge_multi_limit_entries,
 )
 from limits.typing import ClassVar
 
@@ -115,6 +118,64 @@ class MemoryStorage(
             self.storage[key] = max(self.storage[key] - amount, 0)
 
         return self.storage.get(key, 0)
+
+    def incr_many(
+        self, entries: limits.typing.Iterable[MultiLimitEntry]
+    ) -> MultiLimitResult:
+        """
+        Atomically increment several rate limit keys.
+
+        All rules must be satisfiable for any counter to change: if a single
+        rule would exceed its limit every counter is left untouched.
+
+        Entries sharing a key are merged by
+        :func:`limits.storage.base.merge_multi_limit_entries` (their weighted
+        ``cost`` is summed and conflicting windows are rejected). Locks are
+        always acquired in the same globally sorted key order so concurrent
+        multi-key operations cannot deadlock, and all checks and updates happen
+        while every involved lock is held so no intermediate state is visible.
+        """
+        # Validation happens before any lock is acquired; a raised ValueError
+        # therefore guarantees that no counter was modified.
+        merged = merge_multi_limit_entries(entries)
+        ordered = sorted(merged, key=lambda entry: entry.key)
+        self.__schedule_expiry()
+
+        acquired = [self.locks[entry.key] for entry in ordered]
+        try:
+            for lock in acquired:
+                lock.acquire()
+
+            now = time.time()
+            # Expire stale windows inside the critical section so that the
+            # counters read below cannot change until the commit is complete.
+            for entry in ordered:
+                if self.expirations.get(entry.key, 0) <= now:
+                    self.storage.pop(entry.key, None)
+                    self.expirations.pop(entry.key, None)
+
+            rejected = tuple(
+                entry.key
+                for entry in ordered
+                if self.storage.get(entry.key, 0) + entry.cost > entry.limit
+            )
+            if rejected:
+                counters = {
+                    entry.key: self.storage.get(entry.key, 0) for entry in ordered
+                }
+                return MultiLimitResult(False, counters, rejected)
+
+            counters: dict[str, int] = {}
+            for entry in ordered:
+                current = self.storage.get(entry.key, 0)
+                self.storage[entry.key] = current + entry.cost
+                if current == 0:
+                    self.expirations[entry.key] = now + entry.expiry
+                counters[entry.key] = self.storage[entry.key]
+            return MultiLimitResult(True, counters, ())
+        finally:
+            for lock in reversed(acquired):
+                lock.release()
 
     def get(self, key: str) -> int:
         """

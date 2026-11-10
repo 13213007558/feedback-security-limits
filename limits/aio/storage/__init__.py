@@ -5,6 +5,12 @@ Implementations of storage backends to be used with
 
 from __future__ import annotations
 
+from limits.storage.base import (
+    MultiLimitEntry,
+    MultiLimitResult,
+    merge_multi_limit_entries,
+)
+
 from .base import MovingWindowSupport, SlidingWindowCounterSupport, Storage
 from .memcached import MemcachedStorage
 from .memory import MemoryStorage
@@ -16,9 +22,12 @@ __all__ = [
     "MemoryStorage",
     "MongoDBStorage",
     "MovingWindowSupport",
+    "MultiLimitEntry",
+    "MultiLimitResult",
     "RedisClusterStorage",
     "RedisSentinelStorage",
     "RedisStorage",
     "SlidingWindowCounterSupport",
     "Storage",
+    "merge_multi_limit_entries",
 ]

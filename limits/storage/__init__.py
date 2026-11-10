@@ -12,7 +12,14 @@ import limits
 from .._storage_scheme import SCHEMES
 from ..errors import ConfigurationError
 from ..typing import TypeAlias, cast
-from .base import MovingWindowSupport, SlidingWindowCounterSupport, Storage
+from .base import (
+    MovingWindowSupport,
+    MultiLimitEntry,
+    MultiLimitResult,
+    SlidingWindowCounterSupport,
+    Storage,
+    merge_multi_limit_entries,
+)
 from .memcached import MemcachedStorage
 from .memory import MemoryStorage
 from .mongodb import MongoDBStorage, MongoDBStorageBase
@@ -71,10 +78,13 @@ __all__ = [
     "MongoDBStorage",
     "MongoDBStorageBase",
     "MovingWindowSupport",
+    "MultiLimitEntry",
+    "MultiLimitResult",
     "RedisClusterStorage",
     "RedisSentinelStorage",
     "RedisStorage",
     "SlidingWindowCounterSupport",
     "Storage",
+    "merge_multi_limit_entries",
     "storage_from_string",
 ]

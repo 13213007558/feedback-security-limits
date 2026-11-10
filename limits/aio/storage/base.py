@@ -7,6 +7,11 @@ from deprecated.sphinx import versionadded
 
 from limits import errors
 from limits._storage_scheme import StorageRegistry
+from limits.storage.base import (
+    MultiLimitEntry,
+    MultiLimitResult,
+    merge_multi_limit_entries,
+)
 from limits.typing import (
     Any,
     Awaitable,
@@ -48,6 +53,7 @@ class Storage(LazyDependency, metaclass=StorageRegistry):
         super().__init_subclass__(**kwargs)
         for method in (
             "incr",
+            "incr_many",
             "get",
             "get_expiry",
             "check",
@@ -85,6 +91,24 @@ class Storage(LazyDependency, metaclass=StorageRegistry):
         :param amount: the number to increment by
         """
         raise NotImplementedError
+
+    async def incr_many(self, entries: Any) -> MultiLimitResult:
+        """
+        Asynchronous counterpart of
+        :meth:`limits.storage.base.Storage.incr_many`.
+
+        The default implementation cannot provide the all-or-nothing
+        guarantee, so it raises :class:`limits.errors.CapabilityError` rather
+        than silently degrading to a sequence of non atomic :meth:`incr`
+        calls. Backends that can guarantee atomicity override this method.
+
+        :param entries: an iterable of
+         :class:`limits.storage.base.MultiLimitEntry`
+        :raises errors.CapabilityError: if the backend cannot perform the
+         operation atomically
+        :raises ValueError: if ``entries`` is empty or invalid
+        """
+        raise errors.CapabilityError(self, "incr_many")
 
     @abstractmethod
     async def get(self, key: str) -> int:

@@ -132,6 +132,49 @@ In-Memory Storage
 -----------------
 The in-memory storage (:class:`~limits.storage.MemoryStorage`) takes no parameters so the only relevant value is :code:`memory://`
 
+Atomic multi-limit consumption
+------------------------------
+When a single request has to satisfy several rules at once (for example an IP
+limit, an account limit and a global request cap), checking and deducting them
+one after another with :meth:`~limits.storage.base.Storage.incr` can leave the
+first counters incremented when a later rule rejects the request.
+
+:meth:`~limits.storage.base.Storage.incr_many` consumes several rules in a
+single all-or-nothing operation. It accepts an iterable of
+:class:`~limits.storage.MultiLimitEntry` and returns a
+:class:`~limits.storage.MultiLimitResult`:
+
+* every rule must be satisfiable, otherwise **no** counter is modified and the
+  rejected keys are reported in
+  :attr:`~limits.storage.MultiLimitResult.rejected`;
+* entries sharing a key are merged: their weighted ``cost`` is summed, while
+  entries with the same key but different ``limit`` or ``expiry`` raise
+  :class:`ValueError` before any counter changes;
+* invalid parameters (empty input, non positive values, ...) raise
+  :class:`ValueError` without deducting anything.
+
+The in-memory backends (:class:`~limits.storage.MemoryStorage` and
+:class:`~limits.aio.storage.MemoryStorage`) acquire the per-key locks in a
+globally sorted order, so concurrent callers can neither observe an
+intermediate state nor deadlock. Backends that cannot provide the atomic
+guarantee keep the default implementation which raises
+:class:`limits.errors.CapabilityError` instead of silently falling back to a
+sequence of non atomic increments::
+
+    from limits.storage import MemoryStorage, MultiLimitEntry
+
+    storage = MemoryStorage()
+    result = storage.incr_many(
+        [
+            MultiLimitEntry("login/ip/10.0.0.1", 5, 60),
+            MultiLimitEntry("login/account/alice", 5, 60),
+            MultiLimitEntry("login/global", 100, 60),
+        ]
+    )
+    if not result.allowed:
+        # result.rejected tells which dimension(s) refused the request
+        ...
+
 Memcached Storage
 -----------------
 

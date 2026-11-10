@@ -3,6 +3,21 @@
 Changelog
 =========
 
+v5.9.0
+------
+Release Date: 2026-11-10
+
+* Feature
+
+  * Add :meth:`limits.storage.base.Storage.incr_many` (and its async
+    counterpart) to consume several rate limit rules atomically in a single
+    all-or-nothing operation, implemented by the in-memory storage backends.
+    Duplicate keys merge their weighted cost; conflicting windows or invalid
+    parameters raise ``ValueError`` without any deduction. Backends without
+    atomic multi-key support raise the new
+    :class:`limits.errors.CapabilityError` instead of degrading to sequential
+    non atomic increments.
+
 v5.8.0
 ------
 Release Date: 2026-02-04
