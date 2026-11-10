@@ -1,0 +1,11 @@
+deprecated==3.0.1
+hiro==1.1.1
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+pygments==2.21.0
+pytest==9.2.0
+pytest-asyncio==1.4.1.post1
+pytest-lazy-fixtures==1.4.1
+typing-extensions==4.16.0
+wrapt==2.5.2
