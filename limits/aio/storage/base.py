@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 from deprecated.sphinx import versionadded
 
@@ -121,6 +122,117 @@ class Storage(LazyDependency, metaclass=StorageRegistry):
 
         :param key: the key to clear rate limits for
         """
+        raise NotImplementedError
+
+    @versionadded(version="5.9")
+    async def reserve(
+        self, key: str, limit: int, expiry: float, amount: int = 1
+    ) -> Reservation | None:
+        """
+        Reserve ``amount`` units of the rate limit identified by ``key``
+        without committing the consumption. Implementations that support the
+        two-phase reserve/commit/cancel protocol override this method and
+        inherit from :class:`ReservationSupport`.
+
+        :param key: the rate limit key to reserve capacity on
+        :param limit: maximum capacity for ``key`` within ``expiry``
+        :param expiry: amount in seconds until the reservation is no longer
+         committable
+        :param amount: the number of units to reserve
+        :return: a unique :class:`Reservation` handle, or ``None`` if the
+         remaining capacity is insufficient
+        """
+        raise NotImplementedError(
+            f"Reservations are not supported by storage of type {type(self)}"
+        )
+
+    @versionadded(version="5.9")
+    async def commit_reservation(self, reservation: Reservation) -> bool:
+        """
+        Commit a previously :meth:`reserve`d handle, turning the held
+        capacity into an actual consumption.
+
+        :param reservation: the handle returned by :meth:`reserve`
+        :return: ``True`` only for the first, timely commit of an active
+         reservation. Repeated commits, commits racing a cancel and commits
+         arriving after the reservation expired deterministically return
+         ``False`` and leave the ledgers untouched.
+        """
+        raise NotImplementedError(
+            f"Reservations are not supported by storage of type {type(self)}"
+        )
+
+    @versionadded(version="5.9")
+    async def cancel_reservation(self, reservation: Reservation) -> bool:
+        """
+        Release the capacity held by a reservation that will not be
+        committed. Only the reservation's own held units are released; the
+        committed counter is never decremented.
+
+        :param reservation: the handle returned by :meth:`reserve`
+        :return: ``True`` only for the first cancel of an active
+         reservation. Repeated cancels and cancels racing a commit
+         deterministically return ``False``.
+        """
+        raise NotImplementedError(
+            f"Reservations are not supported by storage of type {type(self)}"
+        )
+
+
+@versionadded(version="5.9")
+@dataclass(frozen=True)
+class Reservation:
+    """
+    An opaque, unique handle representing capacity held by
+    :meth:`ReservationSupport.reserve` until it is either committed via
+    :meth:`ReservationSupport.commit_reservation` or released via
+    :meth:`ReservationSupport.cancel_reservation`.
+    """
+
+    id: str
+    key: str
+    amount: int
+    expiry: float
+    created_at: float
+
+
+@versionadded(version="5.9")
+class ReservationSupport(ABC):
+    """
+    Abstract base class for async storages that support the optional
+    two-phase reserve/commit/cancel protocol.
+
+    A reservation first *holds* capacity so that concurrent work cannot
+    consume it, then either commits the hold once the sensitive operation
+    has actually started, or cancels the hold when the preparation failed
+    before any business side effect took place.
+    """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # type: ignore[explicit-any]
+        for method in (
+            "reserve",
+            "commit_reservation",
+            "cancel_reservation",
+        ):
+            # Storage.__init_subclass__ already wraps these for storage
+            # backends; only wrap standalone ReservationSupport subclasses.
+            already_wrapped = hasattr(getattr(cls, method), "__wrapped__")
+            if not already_wrapped:
+                setattr(cls, method, _wrap_errors(getattr(cls, method)))
+        super().__init_subclass__(**kwargs)
+
+    @abstractmethod
+    async def reserve(
+        self, key: str, limit: int, expiry: float, amount: int = 1
+    ) -> Reservation | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def commit_reservation(self, reservation: Reservation) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def cancel_reservation(self, reservation: Reservation) -> bool:
         raise NotImplementedError
 
 

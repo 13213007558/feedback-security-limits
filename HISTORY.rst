@@ -3,6 +3,18 @@
 Changelog
 =========
 
+v5.9.0
+------
+
+* Feature
+
+  * Add an optional two-phase reserve/commit/cancel reservation protocol
+    for the async in-memory storage. A reservation holds quota against the
+    limit until it is committed once the operation starts or canceled when
+    preparation fails; cancels only release the reservation's own hold and
+    can never decrement committed quota or refund a later window. Storages
+    without reservation support reject the protocol explicitly.
+
 v5.8.0
 ------
 Release Date: 2026-02-04

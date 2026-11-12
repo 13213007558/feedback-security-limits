@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import time
+import uuid
 from collections import Counter, defaultdict
 from math import floor
 
@@ -11,11 +12,13 @@ from deprecated.sphinx import versionadded
 import limits.typing
 from limits.aio.storage.base import (
     MovingWindowSupport,
+    Reservation,
+    ReservationSupport,
     SlidingWindowCounterSupport,
     Storage,
 )
 from limits.storage.base import TimestampedSlidingWindow
-from limits.typing import ClassVar
+from limits.typing import Awaitable, Callable, ClassVar
 
 
 class Entry:
@@ -24,9 +27,16 @@ class Entry:
         self.expiry = self.atime + expiry
 
 
+_RESERVED = "reserved"
+
+
 @versionadded(version="2.1")
 class MemoryStorage(
-    Storage, MovingWindowSupport, SlidingWindowCounterSupport, TimestampedSlidingWindow
+    Storage,
+    MovingWindowSupport,
+    SlidingWindowCounterSupport,
+    TimestampedSlidingWindow,
+    ReservationSupport,
 ):
     """
     rate limit storage using :class:`collections.Counter`
@@ -47,6 +57,10 @@ class MemoryStorage(
         self.locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.expirations: dict[str, float] = {}
         self.events: dict[str, list[Entry]] = {}
+        self.reservations: dict[str, tuple[Reservation, str, float]] = {}
+        self._reservation_event: (
+            Callable[[str, Reservation | None], Awaitable[None]] | None
+        ) = None
         self.timer: asyncio.Task[None] | None = None
         super().__init__(uri, wrap_exceptions=wrap_exceptions, **_)
 
@@ -54,6 +68,7 @@ class MemoryStorage(
         state = self.__dict__.copy()
         del state["timer"]
         del state["locks"]
+        state["_reservation_event"] = None
         return state
 
     def __setstate__(self, state: dict[str, limits.typing.Any]) -> None:  # type: ignore[explicit-any]
@@ -84,6 +99,14 @@ class MemoryStorage(
                     self.storage.pop(key, None)
                     self.expirations.pop(key, None)
                     self.locks.pop(key, None)
+
+            for handle, (
+                reservation,
+                state,
+                expires_at,
+            ) in list(self.reservations.items()):
+                if state == _RESERVED and expires_at <= now:
+                    self.reservations.pop(handle, None)
         except asyncio.CancelledError:
             return
 
@@ -145,6 +168,141 @@ class MemoryStorage(
         self.expirations.pop(key, None)
         self.events.pop(key, None)
         self.locks.pop(key, None)
+        for handle, (reservation, _, _) in list(self.reservations.items()):
+            if reservation.key == key:
+                self.reservations.pop(handle, None)
+
+    def _sweep_reservations(self, key: str, now: float) -> None:
+        """Drop expired holds for ``key``. Caller must hold ``self.locks[key]``."""
+        for handle, (reservation, state, expires_at) in list(
+            self.reservations.items()
+        ):
+            if (
+                reservation.key == key
+                and state == _RESERVED
+                and expires_at <= now
+            ):
+                self.reservations.pop(handle, None)
+
+    def _held_capacity(self, key: str, now: float) -> int:
+        """Sum the units held by active (uncommitted) reservations for ``key``."""
+        return sum(
+            reservation.amount
+            for reservation, state, expires_at in self.reservations.values()
+            if reservation.key == key
+            and state == _RESERVED
+            and expires_at > now
+        )
+
+    async def _emit(
+        self, phase: str, reservation: Reservation | None
+    ) -> None:
+        if self._reservation_event is not None:
+            await self._reservation_event(phase, reservation)
+
+    async def reserve(
+        self, key: str, limit: int, expiry: float, amount: int = 1
+    ) -> Reservation | None:
+        """
+        Hold ``amount`` units of the rate limit for ``key`` and return a
+        unique :class:`~limits.aio.storage.base.Reservation` handle.
+
+        The hold is counted against ``limit`` until it is committed with
+        :meth:`commit_reservation`, canceled with
+        :meth:`cancel_reservation`, or expires after ``expiry`` seconds.
+
+        :param key: the rate limit key to reserve capacity on
+        :param limit: maximum capacity for ``key`` within ``expiry``
+        :param expiry: amount in seconds until the reservation can no longer
+         be committed
+        :param amount: the number of units to reserve
+        :return: a reservation handle, or ``None`` when the committed
+         consumption plus active reservations leaves insufficient capacity
+        """
+        if amount > limit:
+            return None
+        await self.__schedule_expiry()
+        async with self.locks[key]:
+            now = time.time()
+            await self._emit("reserve.entered", None)
+            self._sweep_reservations(key, now)
+            committed = await self.get(key)
+            held = self._held_capacity(key, now)
+            if committed + held + amount > limit:
+                return None
+            reservation = Reservation(
+                id=uuid.uuid4().hex,
+                key=key,
+                amount=amount,
+                expiry=expiry,
+                created_at=now,
+            )
+            self.reservations[reservation.id] = (
+                reservation,
+                _RESERVED,
+                now + expiry,
+            )
+        try:
+            # The barrier sits after the lock is released so a concurrent
+            # reserve is not blocked while this task is parked.
+            await self._emit("reserve.recorded", reservation)
+        except asyncio.CancelledError:
+            # The handle never reached the caller: roll the hold back so
+            # the capacity cannot leak while the task is cancelled.
+            async with self.locks[key]:
+                self.reservations.pop(reservation.id, None)
+            raise
+        return reservation
+
+    async def commit_reservation(self, reservation: Reservation) -> bool:
+        """
+        Convert an active reservation into an actual consumption.
+
+        :param reservation: the handle returned by :meth:`reserve`
+        :return: ``True`` exactly once for a timely, un-canceled reservation.
+         Expired handles, unknown handles and any repeat/racing call return
+         ``False`` without touching the committed counter.
+        """
+        async with self.locks[reservation.key]:
+            now = time.time()
+            entry = self.reservations.pop(reservation.id, None)
+            if entry is None or entry[2] <= now:
+                # Unknown, expired (already swept), committed or racing a
+                # cancel: no active record means the commit deterministically
+                # loses without touching the committed counter.
+                return False
+            # Inline the counter update: ``incr`` would re-enter this lock.
+            current = self.storage[reservation.key]
+            self.storage[reservation.key] = current + reservation.amount
+            if current == 0:
+                self.expirations[reservation.key] = now + reservation.expiry
+        # Barrier after the lock is released: a racing operation is now free
+        # to observe the terminal state instead of deadlocking on the lock.
+        await self._emit("commit.completed", reservation)
+        return True
+
+    async def cancel_reservation(self, reservation: Reservation) -> bool:
+        """
+        Release only the capacity held by this reservation.
+
+        The committed counter is intentionally never decremented here: a
+        cancel can only undo this handle's own hold, so a reservation can
+        never manufacture a refund for consumption in a later window.
+
+        :param reservation: the handle returned by :meth:`reserve`
+        :return: ``True`` exactly once for an active reservation. Unknown,
+         expired, already committed or repeated cancels return ``False``.
+        """
+        async with self.locks[reservation.key]:
+            now = time.time()
+            entry = self.reservations.pop(reservation.id, None)
+            if entry is None or entry[2] <= now:
+                # Unknown, expired (the sweep removes these anyway), already
+                # committed or a repeated cancel: only an active record can
+                # be released, exactly once.
+                return False
+        await self._emit("cancel.completed", reservation)
+        return True
 
     async def acquire_entry(
         self, key: str, limit: int, expiry: int, amount: int = 1
@@ -277,6 +435,7 @@ class MemoryStorage(
         self.expirations.clear()
         self.events.clear()
         self.locks.clear()
+        self.reservations.clear()
 
         return num_items
 
